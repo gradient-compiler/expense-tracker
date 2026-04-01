@@ -11,8 +11,8 @@ import re
 # ─── Config ───
 st.set_page_config(page_title="Expense Tracker", page_icon="💰", layout="wide")
 
-CLAUDE_MODEL = st.secrets.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-CURRENCY = st.secrets.get("CURRENCY_SYMBOL", "$")
+CLAUDE_MODEL = st.secrets.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+CURRENCY = st.secrets.get("CURRENCY_SYMBOL", "S$")
 CATEGORIES = [
     "Food & Dining", "Transport", "Rent/Housing", "Utilities",
     "Entertainment", "Health/Medical", "Shopping", "Groceries",
@@ -93,7 +93,7 @@ def get_or_create_sheet(client):
     return worksheet
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_expenses(_worksheet):
     """Load all expenses into a DataFrame."""
     worksheet = _worksheet
@@ -124,7 +124,27 @@ def add_expense(worksheet, expense_data, username):
 
 
 def find_sheet_row(worksheet, row_data):
-    """Find the 1-based sheet row index matching a DataFrame row by Date+Description+Timestamp."""
+    """Find the 1-based sheet row index matching a DataFrame row by Timestamp."""
+    timestamp = str(row_data.get("Timestamp", ""))
+    if not timestamp:
+        return None
+
+    try:
+        # Search in column H (Timestamp, column index 8) — server-side search
+        cells = worksheet.findall(timestamp, in_column=8)
+        if cells:
+            # Verify by checking description too (in case of duplicate timestamps)
+            for cell in cells:
+                row_values = worksheet.row_values(cell.row)
+                if (len(row_values) > 3
+                        and row_values[3] == str(row_data.get("Description", ""))):
+                    return cell.row
+            # Fallback: return first match if description check fails
+            return cells[0].row
+    except Exception:
+        pass
+
+    # Fallback to full scan (original behavior)
     all_values = worksheet.get_all_values()
     row_date = (row_data["Date"].strftime("%Y-%m-%d")
                 if hasattr(row_data["Date"], "strftime") else str(row_data["Date"]))
@@ -136,7 +156,7 @@ def find_sheet_row(worksheet, row_data):
     return None
 
 
-def update_expense(worksheet, sheet_row_idx, expense_data, username):
+def update_expense(worksheet, sheet_row_idx, expense_data, added_by):
     """Update an existing row in the Google Sheet."""
     updated_row = [
         expense_data["date"],
@@ -145,7 +165,7 @@ def update_expense(worksheet, sheet_row_idx, expense_data, username):
         expense_data["description"],
         expense_data["payment_method"],
         expense_data.get("notes", ""),
-        username,
+        added_by,
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     ]
     worksheet.update(f"A{sheet_row_idx}:H{sheet_row_idx}", [updated_row],
@@ -153,21 +173,26 @@ def update_expense(worksheet, sheet_row_idx, expense_data, username):
 
 
 # ─── Claude NLP Parsing ───
+@st.cache_resource
+def get_anthropic_client():
+    """Reuse a single Anthropic client instance across reruns."""
+    return Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+
+
 def parse_expense_with_claude(user_input):
     """Use Claude to parse natural language into structured expense data."""
-    client = Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+    client = get_anthropic_client()
 
     today = date.today().isoformat()
-    prompt = f"""Parse this expense entry into structured data. Today's date is {today}.
 
-Input: "{user_input}"
+    system_prompt = f"""You are an expense parser. Parse natural language expense entries into structured JSON.
 
 Return ONLY valid JSON with these fields:
 - "date": string in YYYY-MM-DD format (default to today if not mentioned)
 - "amount": number (just the number, no currency symbols)
 - "category": one of {json.dumps(CATEGORIES)}
 - "description": brief description of the expense
-- "payment_method": one of {json.dumps(PAYMENT_METHODS)} (default to "Cash" if not mentioned)
+- "payment_method": one of {json.dumps(PAYMENT_METHODS)} (default to "Credit Card" if not mentioned)
 - "notes": any extra context, or empty string
 
 Be smart about inferring:
@@ -188,8 +213,20 @@ Respond with ONLY the JSON object, nothing else."""
 
     response = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=300,
-        messages=[{"role": "user", "content": prompt}],
+        max_tokens=150,
+        system=[
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": f"Today's date is {today}. Parse this: \"{user_input}\"",
+            }
+        ],
     )
 
     text = response.content[0].text.strip()
@@ -207,6 +244,8 @@ Respond with ONLY the JSON object, nothing else."""
 # ─── UI Components ───
 def render_smart_input(worksheet):
     """The natural language input section."""
+    if "smart_input_counter" not in st.session_state:
+        st.session_state.smart_input_counter = 0
     st.markdown("### ✍️ Add Expense")
     st.markdown("Type naturally — e.g. *'coffee 4.50 credit card'* or *'uber to airport $32 yesterday'*")
 
@@ -216,6 +255,7 @@ def render_smart_input(worksheet):
     for i, tmpl in enumerate(templates):
         if tmpl_cols[i].button(tmpl, key=f"tmpl_{i}", use_container_width=True):
             st.session_state.smart_input_prefill = tmpl
+            st.session_state.smart_input_counter += 1
             st.rerun()
 
     prefill = st.session_state.pop("smart_input_prefill", "")
@@ -224,6 +264,7 @@ def render_smart_input(worksheet):
         value=prefill,
         placeholder="grabbed lunch with coworkers, $18, paid with visa",
         label_visibility="collapsed",
+        key=f"smart_input_{st.session_state.smart_input_counter}",
     )
 
     col_parse, col_clear = st.columns([1, 1])
@@ -244,6 +285,7 @@ def render_smart_input(worksheet):
     if col_clear.button("🗑️ Clear", use_container_width=True):
         st.session_state.pop("parsed_expense", None)
         st.session_state.pop("show_confirm", None)
+        st.session_state.smart_input_counter += 1
         st.rerun()
 
     # Show parsed result for confirmation/editing
@@ -286,14 +328,17 @@ def render_smart_input(worksheet):
             st.success(f"✅ Saved: {exp_desc} — {CURRENCY}{exp_amount:.2f}")
             st.session_state.pop("parsed_expense", None)
             st.session_state.pop("show_confirm", None)
+            st.session_state.smart_input_counter += 1
             load_expenses.clear()
             st.rerun()
 
 
 def render_manual_input(worksheet):
     """Fallback manual entry form."""
+    if "manual_entry_counter" not in st.session_state:
+        st.session_state.manual_entry_counter = 0
     st.markdown("### 📝 Manual Entry")
-    with st.form("manual_entry"):
+    with st.form(f"manual_entry_{st.session_state.manual_entry_counter}"):
         c1, c2 = st.columns(2)
         exp_date = c1.date_input("Date", value=date.today())
         exp_amount = c2.number_input(f"Amount ({CURRENCY})", min_value=0.0, step=0.01, format="%.2f")
@@ -323,6 +368,7 @@ def render_manual_input(worksheet):
             add_expense(worksheet, expense_data, st.session_state.username)
         st.success(f"✅ Saved: {exp_desc} — {CURRENCY}{exp_amount:.2f}")
         load_expenses.clear()
+        st.session_state.manual_entry_counter += 1
         st.rerun()
 
 
@@ -510,26 +556,38 @@ def render_history(df, worksheet):
                     key="edit_row_select",
                 )
                 selected = page_df.iloc[row_to_edit - 1]
-                with st.form("edit_expense_form"):
+                _row_key = f"{page}_{row_to_edit}"
+                with st.form(f"edit_expense_form_{_row_key}"):
                     ec1, ec2 = st.columns(2)
                     try:
                         default_date = selected["Date"].date() if hasattr(selected["Date"], "date") else date.today()
                     except Exception:
                         default_date = date.today()
-                    edit_date = ec1.date_input("Date", value=default_date, key="edit_date")
+                    edit_date = ec1.date_input("Date", value=default_date, key=f"edit_date_{_row_key}")
                     edit_amount = ec2.number_input(
                         f"Amount ({CURRENCY})", value=float(selected["Amount"]),
-                        min_value=0.0, step=0.01, format="%.2f", key="edit_amount",
+                        min_value=0.0, step=0.01, format="%.2f", key=f"edit_amount_{_row_key}",
                     )
 
                     ec3, ec4 = st.columns(2)
                     cat_idx = CATEGORIES.index(selected["Category"]) if selected["Category"] in CATEGORIES else 0
-                    edit_category = ec3.selectbox("Category", CATEGORIES, index=cat_idx, key="edit_category")
+                    edit_category = ec3.selectbox("Category", CATEGORIES, index=cat_idx, key=f"edit_category_{_row_key}")
                     pay_idx = PAYMENT_METHODS.index(selected["Payment Method"]) if selected["Payment Method"] in PAYMENT_METHODS else 0
-                    edit_payment = ec4.selectbox("Payment Method", PAYMENT_METHODS, index=pay_idx, key="edit_payment")
+                    edit_payment = ec4.selectbox("Payment Method", PAYMENT_METHODS, index=pay_idx, key=f"edit_payment_{_row_key}")
 
-                    edit_desc = st.text_input("Description", value=str(selected.get("Description", "")), key="edit_desc")
-                    edit_notes = st.text_input("Notes", value=str(selected.get("Notes", "")), key="edit_notes")
+                    edit_desc = st.text_input("Description", value=str(selected.get("Description", "")), key=f"edit_desc_{_row_key}")
+                    edit_notes = st.text_input("Notes", value=str(selected.get("Notes", "")), key=f"edit_notes_{_row_key}")
+
+                    # Added By — editable, populated from known users
+                    known_users = df["Added By"].unique().tolist() if "Added By" in df.columns else []
+                    current_added_by = str(selected.get("Added By", st.session_state.username))
+                    if current_added_by and current_added_by not in known_users:
+                        known_users.insert(0, current_added_by)
+                    added_by_idx = known_users.index(current_added_by) if current_added_by in known_users else 0
+                    edit_added_by = st.selectbox(
+                        "Added By", options=known_users, index=added_by_idx,
+                        key=f"edit_added_by_{_row_key}",
+                    )
 
                     save_edit = st.form_submit_button("💾 Save Changes", use_container_width=True, type="primary")
 
@@ -539,19 +597,30 @@ def render_history(df, worksheet):
                     else:
                         sheet_row_idx = find_sheet_row(worksheet, selected)
                         if sheet_row_idx:
-                            expense_data = {
-                                "date": edit_date.isoformat(),
-                                "amount": edit_amount,
-                                "category": edit_category,
-                                "description": edit_desc,
-                                "payment_method": edit_payment,
-                                "notes": edit_notes,
-                            }
-                            with st.spinner("Updating expense..."):
-                                update_expense(worksheet, sheet_row_idx, expense_data, st.session_state.username)
-                            st.success(f"✅ Updated: {edit_desc} — {CURRENCY}{edit_amount:.2f}")
-                            load_expenses.clear()
-                            st.rerun()
+                            # Optimistic locking: check if the row was modified since we loaded it
+                            current_row = worksheet.row_values(sheet_row_idx)
+                            original_timestamp = str(selected.get("Timestamp", ""))
+                            current_timestamp = current_row[7] if len(current_row) > 7 else ""
+
+                            if original_timestamp and current_timestamp and original_timestamp != current_timestamp:
+                                st.error(
+                                    "⚠️ This expense was modified by another user since you loaded it. "
+                                    "Please refresh the page and try again."
+                                )
+                            else:
+                                expense_data = {
+                                    "date": edit_date.isoformat(),
+                                    "amount": edit_amount,
+                                    "category": edit_category,
+                                    "description": edit_desc,
+                                    "payment_method": edit_payment,
+                                    "notes": edit_notes,
+                                }
+                                with st.spinner("Updating expense..."):
+                                    update_expense(worksheet, sheet_row_idx, expense_data, edit_added_by)
+                                st.success(f"✅ Updated: {edit_desc} — {CURRENCY}{edit_amount:.2f}")
+                                load_expenses.clear()
+                                st.rerun()
                         else:
                             st.error("Could not find the entry in the sheet. It may have been deleted.")
 
@@ -566,15 +635,18 @@ def render_history(df, worksheet):
                     format_func=lambda i: f"Row {i}: {page_df.iloc[i-1].get('Description', '')} — {CURRENCY}{page_df.iloc[i-1].get('Amount', 0):,.2f}",
                 )
                 if st.button("Delete Selected", type="primary") and rows_to_delete:
-                    deleted = 0
-                    for row_num in sorted(rows_to_delete, reverse=True):
+                    # Collect all sheet row indices first, then delete in descending order
+                    # to avoid index shifting between find and delete operations
+                    sheet_rows = []
+                    for row_num in rows_to_delete:
                         row = page_df.iloc[row_num - 1]
                         sheet_row_idx = find_sheet_row(worksheet, row)
                         if sheet_row_idx:
-                            worksheet.delete_rows(sheet_row_idx)
-                            deleted += 1
-                    if deleted:
-                        st.success(f"Deleted {deleted} expense(s).")
+                            sheet_rows.append(sheet_row_idx)
+                    if sheet_rows:
+                        for idx in sorted(sheet_rows, reverse=True):
+                            worksheet.delete_rows(idx)
+                        st.success(f"Deleted {len(sheet_rows)} expense(s).")
                         load_expenses.clear()
                         st.rerun()
 
