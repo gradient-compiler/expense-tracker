@@ -123,6 +123,35 @@ def add_expense(worksheet, expense_data, username):
     worksheet.append_row(row, value_input_option="USER_ENTERED")
 
 
+def find_sheet_row(worksheet, row_data):
+    """Find the 1-based sheet row index matching a DataFrame row by Date+Description+Timestamp."""
+    all_values = worksheet.get_all_values()
+    row_date = (row_data["Date"].strftime("%Y-%m-%d")
+                if hasattr(row_data["Date"], "strftime") else str(row_data["Date"]))
+    for i, sheet_row in enumerate(all_values[1:], start=2):
+        if (sheet_row[0] == row_date and
+                sheet_row[3] == str(row_data.get("Description", "")) and
+                sheet_row[7] == str(row_data.get("Timestamp", ""))):
+            return i
+    return None
+
+
+def update_expense(worksheet, sheet_row_idx, expense_data, username):
+    """Update an existing row in the Google Sheet."""
+    updated_row = [
+        expense_data["date"],
+        str(expense_data["amount"]),
+        expense_data["category"],
+        expense_data["description"],
+        expense_data["payment_method"],
+        expense_data.get("notes", ""),
+        username,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    ]
+    worksheet.update(f"A{sheet_row_idx}:H{sheet_row_idx}", [updated_row],
+                     value_input_option="USER_ENTERED")
+
+
 # ─── Claude NLP Parsing ───
 def parse_expense_with_claude(user_input):
     """Use Claude to parse natural language into structured expense data."""
@@ -457,7 +486,7 @@ def render_history(df, worksheet):
     st.caption(f"Showing {start + 1}-{start + len(page_df)} of {total_entries} entries (Page {page}/{total_pages})")
 
     # CSV export (unformatted data)
-    col_export, col_delete = st.columns([1, 1])
+    col_export, col_edit, col_delete = st.columns([1, 1, 1])
     csv_data = filtered.copy()
     if "Date" in csv_data.columns:
         csv_data["Date"] = csv_data["Date"].dt.strftime("%Y-%m-%d").fillna("")
@@ -469,6 +498,62 @@ def render_history(df, worksheet):
         mime="text/csv",
         use_container_width=True,
     )
+
+    # Edit expenses
+    with col_edit:
+        with st.expander("✏️ Edit Expense"):
+            if len(page_df) > 0:
+                row_to_edit = st.selectbox(
+                    "Select entry to edit",
+                    options=list(range(1, len(page_df) + 1)),
+                    format_func=lambda i: f"Row {i}: {page_df.iloc[i-1].get('Description', '')} — {CURRENCY}{page_df.iloc[i-1].get('Amount', 0):,.2f}",
+                    key="edit_row_select",
+                )
+                selected = page_df.iloc[row_to_edit - 1]
+                with st.form("edit_expense_form"):
+                    ec1, ec2 = st.columns(2)
+                    try:
+                        default_date = selected["Date"].date() if hasattr(selected["Date"], "date") else date.today()
+                    except Exception:
+                        default_date = date.today()
+                    edit_date = ec1.date_input("Date", value=default_date, key="edit_date")
+                    edit_amount = ec2.number_input(
+                        f"Amount ({CURRENCY})", value=float(selected["Amount"]),
+                        min_value=0.0, step=0.01, format="%.2f", key="edit_amount",
+                    )
+
+                    ec3, ec4 = st.columns(2)
+                    cat_idx = CATEGORIES.index(selected["Category"]) if selected["Category"] in CATEGORIES else 0
+                    edit_category = ec3.selectbox("Category", CATEGORIES, index=cat_idx, key="edit_category")
+                    pay_idx = PAYMENT_METHODS.index(selected["Payment Method"]) if selected["Payment Method"] in PAYMENT_METHODS else 0
+                    edit_payment = ec4.selectbox("Payment Method", PAYMENT_METHODS, index=pay_idx, key="edit_payment")
+
+                    edit_desc = st.text_input("Description", value=str(selected.get("Description", "")), key="edit_desc")
+                    edit_notes = st.text_input("Notes", value=str(selected.get("Notes", "")), key="edit_notes")
+
+                    save_edit = st.form_submit_button("💾 Save Changes", use_container_width=True, type="primary")
+
+                if save_edit:
+                    if edit_amount <= 0 or not edit_desc.strip():
+                        st.warning("Please enter an amount and description.")
+                    else:
+                        sheet_row_idx = find_sheet_row(worksheet, selected)
+                        if sheet_row_idx:
+                            expense_data = {
+                                "date": edit_date.isoformat(),
+                                "amount": edit_amount,
+                                "category": edit_category,
+                                "description": edit_desc,
+                                "payment_method": edit_payment,
+                                "notes": edit_notes,
+                            }
+                            with st.spinner("Updating expense..."):
+                                update_expense(worksheet, sheet_row_idx, expense_data, st.session_state.username)
+                            st.success(f"✅ Updated: {edit_desc} — {CURRENCY}{edit_amount:.2f}")
+                            load_expenses.clear()
+                            st.rerun()
+                        else:
+                            st.error("Could not find the entry in the sheet. It may have been deleted.")
 
     # Delete expenses
     with col_delete:
@@ -484,15 +569,10 @@ def render_history(df, worksheet):
                     deleted = 0
                     for row_num in sorted(rows_to_delete, reverse=True):
                         row = page_df.iloc[row_num - 1]
-                        all_values = worksheet.get_all_values()
-                        for i, sheet_row in enumerate(all_values[1:], start=2):
-                            row_date = row["Date"].strftime("%Y-%m-%d") if hasattr(row["Date"], "strftime") else str(row["Date"])
-                            if (sheet_row[0] == row_date and
-                                sheet_row[3] == str(row.get("Description", "")) and
-                                sheet_row[7] == str(row.get("Timestamp", ""))):
-                                worksheet.delete_rows(i)
-                                deleted += 1
-                                break
+                        sheet_row_idx = find_sheet_row(worksheet, row)
+                        if sheet_row_idx:
+                            worksheet.delete_rows(sheet_row_idx)
+                            deleted += 1
                     if deleted:
                         st.success(f"Deleted {deleted} expense(s).")
                         load_expenses.clear()
@@ -508,6 +588,53 @@ def confirm_logout():
         st.rerun()
     if c2.button("Cancel", use_container_width=True):
         st.rerun()
+
+
+def render_guide():
+    """Feature walkthrough and usage guide."""
+    st.markdown("### ℹ️ Quick Guide")
+    st.markdown("A short walkthrough of everything this app can do.")
+
+    st.markdown("---")
+
+    st.markdown("""
+#### 🧠 Smart Input
+Type expenses in plain English and let AI do the rest.
+
+- **Natural language** — write something like *"coffee 4.50 credit card"* or *"uber to airport $32 yesterday"* and the AI will extract the date, amount, category, and payment method automatically.
+- **Quick templates** — tap a preset button to pre-fill common expenses.
+- **Review before saving** — the parsed result appears in an editable form so you can tweak anything before confirming.
+
+#### 📝 Manual Entry
+Prefer filling out a form yourself? Use the Manual tab to enter each field directly — date, amount, category, payment method, description, and notes.
+
+#### 📊 Dashboard
+Visualize your spending at a glance.
+
+- **Top-line stats** — total spent, number of entries, average per entry, and highest single expense.
+- **Date filters** — pick a custom range or use the quick presets (This Week, This Month, Last 30 Days, All Time).
+- **Charts** — interactive pie chart by category, bar chart by payment method, and an area chart showing the daily spending trend.
+
+#### 📋 History
+Browse, search, and manage every recorded expense.
+
+- **Search & filter** — find entries by keyword, category, payment method, or contributor.
+- **Pagination** — 25 entries per page for easy browsing.
+- **Export** — download your filtered data as a CSV file.
+- **Edit** — select any entry to update its details.
+- **Delete** — remove one or more entries at once.
+
+#### ⚡ Sidebar
+Always visible on the left.
+
+- **Today / This Month** — real-time spending totals.
+- **Budget tracker** — set a monthly budget and see a progress bar. A warning appears when you hit 90%.
+- **Contributors** — see how much each person has added.
+- **Refresh / Logout** — reload data from the sheet or sign out.
+""")
+
+    st.markdown("---")
+    st.caption("All data is stored in a shared Google Sheet. Every user logs in with the same password and their own name.")
 
 
 # ─── Main App ───
@@ -549,7 +676,9 @@ def main():
     df = load_expenses(worksheet)
 
     # Tabs
-    tab_smart, tab_manual, tab_dash, tab_history = st.tabs(["🧠 Smart Input", "📝 Manual", "📊 Dashboard", "📋 History"])
+    tab_smart, tab_manual, tab_dash, tab_history, tab_guide = st.tabs(
+        ["🧠 Smart Input", "📝 Manual", "📊 Dashboard", "📋 History", "ℹ️ Guide"]
+    )
 
     with tab_smart:
         render_smart_input(worksheet)
@@ -562,6 +691,9 @@ def main():
 
     with tab_history:
         render_history(df, worksheet)
+
+    with tab_guide:
+        render_guide()
 
     # Sidebar
     with st.sidebar:
