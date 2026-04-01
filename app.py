@@ -18,7 +18,7 @@ CATEGORIES = [
     "Entertainment", "Health/Medical", "Shopping", "Groceries",
     "Subscriptions", "Education", "Other"
 ]
-PAYMENT_METHODS = ["Cash", "Credit Card", "Debit Card", "UPI/Digital", "Bank Transfer"]
+PAYMENT_METHODS = ["Cash", "Credit Card", "Debit Card", "Digital/Paylah", "Bank Transfer"]
 SHEET_HEADERS = ["Date", "Amount", "Category", "Description", "Payment Method", "Notes", "Added By", "Timestamp"]
 
 
@@ -207,7 +207,7 @@ Be smart about inferring:
 - "electric" / "water" / "internet" / "phone bill" → Utilities
 - "course" / "books" / "tuition" → Education
 
-If a credit card or card is mentioned, use "Credit Card". If Venmo/Zelle/PayPal/UPI/Apple Pay/Google Pay is mentioned, use "UPI/Digital".
+If a credit card or card is mentioned, use "Credit Card". If Venmo/Zelle/PayPal/UPI/Apple Pay/Google Pay is mentioned, use "Digital/Paylah".
 
 Respond with ONLY the JSON object, nothing else."""
 
