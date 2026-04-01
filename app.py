@@ -54,10 +54,15 @@ def check_password():
 @st.cache_resource
 def get_gsheet_connection():
     """Connect to Google Sheets using service account credentials."""
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
+    sheet_id = st.secrets.get("SHEET_ID", "")
+    if sheet_id:
+        # Only need Sheets scope when opening by ID (no Drive API needed)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    else:
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=scopes
     )
@@ -67,13 +72,16 @@ def get_gsheet_connection():
 
 def get_or_create_sheet(client):
     """Open existing sheet or create a new one with headers."""
-    sheet_name = st.secrets.get("SHEET_NAME", "Expense Tracker")
-    try:
-        spreadsheet = client.open(sheet_name)
-    except gspread.SpreadsheetNotFound:
-        spreadsheet = client.create(sheet_name)
-        # Share with anyone who has the link (view) — edit access via service account
-        spreadsheet.share("", perm_type="anyone", role="reader")
+    sheet_id = st.secrets.get("SHEET_ID", "")
+    if sheet_id:
+        spreadsheet = client.open_by_key(sheet_id)
+    else:
+        sheet_name = st.secrets.get("SHEET_NAME", "Expense Tracker")
+        try:
+            spreadsheet = client.open(sheet_name)
+        except gspread.SpreadsheetNotFound:
+            spreadsheet = client.create(sheet_name)
+            spreadsheet.share("", perm_type="anyone", role="reader")
 
     worksheet = spreadsheet.sheet1
     existing = worksheet.row_values(1)
