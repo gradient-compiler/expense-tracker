@@ -208,6 +208,7 @@ def render_smart_input(worksheet):
                 parsed = parse_expense_with_claude(user_input)
                 st.session_state.parsed_expense = parsed
                 st.session_state.show_confirm = True
+                st.rerun()
             except Exception as e:
                 st.error(f"Couldn't parse that. Try rephrasing. Error: {e}")
 
@@ -229,7 +230,7 @@ def render_smart_input(worksheet):
             except (ValueError, KeyError):
                 default_date = date.today()
             exp_date = c1.date_input("Date", value=default_date)
-            exp_amount = c2.number_input("Amount ({CURRENCY})", value=float(parsed["amount"]), min_value=0.0, step=0.01, format="%.2f")
+            exp_amount = c2.number_input(f"Amount ({CURRENCY})", value=float(parsed["amount"]), min_value=0.0, step=0.01, format="%.2f")
 
             c3, c4 = st.columns(2)
             cat_idx = CATEGORIES.index(parsed["category"]) if parsed["category"] in CATEGORIES else 0
@@ -266,7 +267,7 @@ def render_manual_input(worksheet):
     with st.form("manual_entry"):
         c1, c2 = st.columns(2)
         exp_date = c1.date_input("Date", value=date.today())
-        exp_amount = c2.number_input("Amount ({CURRENCY})", min_value=0.0, step=0.01, format="%.2f")
+        exp_amount = c2.number_input(f"Amount ({CURRENCY})", min_value=0.0, step=0.01, format="%.2f")
 
         c3, c4 = st.columns(2)
         exp_category = c3.selectbox("Category", CATEGORIES)
@@ -292,7 +293,7 @@ def render_manual_input(worksheet):
         with st.spinner("Saving..."):
             add_expense(worksheet, expense_data, st.session_state.username)
         st.success(f"✅ Saved: {exp_desc} — {CURRENCY}{exp_amount:.2f}")
-        st.cache_data.clear()
+        load_expenses.clear()
         st.rerun()
 
 
