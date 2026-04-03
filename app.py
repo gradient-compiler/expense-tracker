@@ -16,7 +16,7 @@ CURRENCY = st.secrets.get("CURRENCY_SYMBOL", "S$")
 CATEGORIES = [
     "Food & Dining", "Transport", "Rent/Housing", "Utilities",
     "Entertainment", "Health/Medical", "Shopping", "Groceries",
-    "Subscriptions", "Education", "Other"
+    "Subscriptions", "Education", "Wedding", "Other"
 ]
 PAYMENT_METHODS = ["Cash", "Credit Card", "Debit Card", "Digital/Paylah", "Bank Transfer"]
 SHEET_HEADERS = ["Date", "Amount", "Category", "Description", "Payment Method", "Notes", "Added By", "Timestamp"]
